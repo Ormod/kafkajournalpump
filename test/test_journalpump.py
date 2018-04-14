@@ -1,6 +1,7 @@
 from collections import OrderedDict
-from journalpump.journalpump import (ElasticsearchSender, FieldFilter, JournalObject, JournalObjectHandler,
-                                     JournalPump, MAX_KAFKA_MESSAGE_SIZE, KafkaSender, LogplexSender)
+from datetime import datetime
+from journalpump.journalpump import (default_json_serialization, ElasticsearchSender, FieldFilter, JournalObject,
+                                     JournalObjectHandler, JournalPump, MAX_KAFKA_MESSAGE_SIZE, KafkaSender, LogplexSender)
 from unittest import mock, TestCase
 import json
 
@@ -191,14 +192,16 @@ class TestJournalObjectHandler(TestCase):
         self.reader.senders = {"sender_a": self.sender_a, "sender_b": self.sender_b, "sender_c": self.sender_c}
 
     def test_filtered_processing(self):
-        jobject = JournalObject(entry=OrderedDict(a=1, b=2, c=3), cursor=10)
+        jobject = JournalObject(entry=OrderedDict(a=1, b=2, c=3, REALTIME_TIMESTAMP=1), cursor=10)
         handler = JournalObjectHandler(jobject, self.reader, self.pump)
         assert handler.process() is True
         self.sender_a.msg_buffer.add_item.assert_called_once_with(
             item=json.dumps({"a": 1}).encode("utf-8"), cursor=10)
         self.sender_b.msg_buffer.add_item.assert_called_once_with(
             item=json.dumps(OrderedDict(a=1, b=2)).encode("utf-8"), cursor=10)
-        largest_data = json.dumps(OrderedDict(a=1, b=2, c=3)).encode("utf-8")
+        largest_data = json.dumps(
+            OrderedDict(a=1, b=2, c=3, REALTIME_TIMESTAMP=1, timestamp=datetime.utcfromtimestamp(1)),
+            default=default_json_serialization).encode("utf-8")
         self.sender_c.msg_buffer.add_item.assert_called_once_with(
             item=largest_data, cursor=10)
         self.reader.inc_line_stats.assert_called_once_with(journal_bytes=len(largest_data), journal_lines=1)
@@ -219,6 +222,13 @@ class TestJournalObjectHandler(TestCase):
             "partial_data": too_large_serialized[:1024],
         }).encode("utf-8")
         self.sender_b.msg_buffer.add_item.assert_called_once_with(item=error_item, cursor=10)
+
+        error_message = "too large message {} bytes vs maximum {} bytes".format(
+            1048636, MAX_KAFKA_MESSAGE_SIZE)  # includes timestamp since it's not filtered
+        error_item = json.dumps({
+            "error": error_message,
+            "partial_data": too_large_serialized[:1024],
+        }).encode("utf-8")
         self.sender_c.msg_buffer.add_item.assert_called_once_with(item=error_item, cursor=10)
         self.pump.stats.increase.assert_called_once_with("journal.read_error", tags="tags")
         self.reader.inc_line_stats.assert_called_once_with(journal_bytes=len(error_item), journal_lines=1)
